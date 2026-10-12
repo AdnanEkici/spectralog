@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectralog"
-version = "1.0.5"
+version = "1.0.6"
 description = "A configurable Python logging package with colored console output, rotating files, JSON logging, Rich integration, syslog, custom log levels, and multiprocessing-safe logging."
 readme = "README.md"
 requires-python = ">=3.10"
