@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import atexit
+import json
+import os
+import sys
 from collections.abc import Callable
+from logging import LogRecord
+from multiprocessing.queues import Queue
+from pathlib import Path
 from threading import Lock
+from types import FrameType
 from typing import Any
 
 from spectralog.configuration.configuration import LoggerConfiguration
@@ -18,6 +25,10 @@ from spectralog.levels.log_level_registry import LogLevelRegistry
 from spectralog.runtime.multiprocessing_logging_runtime import (
     MultiprocessingLoggingRuntime,
 )
+
+_SPECTRALOG_PACKAGE_DIRECTORY = Path(__file__).resolve().parents[1]
+
+SPECTRALOG_CUSTOM_LOG_LEVELS_ENVIRONMENT_VARIABLE = "SPECTRALOG_CUSTOM_LOG_LEVELS"
 
 
 class ApplicationLogger:
@@ -46,7 +57,8 @@ class ApplicationLogger:
     Custom log levels registered through :meth:`add_log_level` become available as
     dynamic methods. For example, registering a ``NOTICE`` level allows
     ``logger.notice("message")`` to be used in the same manner as the built-in
-    logging methods.
+    logging methods. Registered levels are also recorded in the environment so
+    that child processes started afterwards can re-register them.
     """
 
     _instance: ApplicationLogger | None = None
@@ -246,6 +258,11 @@ class ApplicationLogger:
         requested attribute name is normalized to uppercase and resolved through the
         application's :class:`~spectralog.levels.log_level_registry.LogLevelRegistry`.
 
+        Names beginning with an underscore are never treated as log levels and raise
+        :class:`AttributeError` immediately. This prevents infinite recursion when
+        the instance is not fully initialized, for example while :mod:`copy` or
+        :mod:`pickle` probe for special methods.
+
         When the requested name matches a registered custom log level, SpectraLog
         returns a dynamically created logging method that emits records using the
         severity associated with that level.
@@ -266,8 +283,8 @@ class ApplicationLogger:
 
         Raises:
             AttributeError:
-                If ``attribute_name`` does not correspond to a registered SpectraLog
-                log level.
+                If ``attribute_name`` begins with an underscore or does not
+                correspond to a registered SpectraLog log level.
 
         Returns:
             Callable[..., None]:
@@ -305,6 +322,11 @@ class ApplicationLogger:
                     file=True,
                 )
         """
+        if attribute_name.startswith("_"):
+            raise AttributeError(
+                f"'{self.__class__.__name__}' has no attribute " f"'{attribute_name}'.",
+            )
+
         normalized_level_name = attribute_name.upper()
 
         if not self._log_level_registry.contains(
@@ -377,6 +399,28 @@ class ApplicationLogger:
 
         return resolved_log_method
 
+    @property
+    def multiprocessing_log_record_queue(self) -> Queue[LogRecord] | None:
+        """Return the multiprocessing queue owned by this logger's runtime, if any.
+
+        The queue is available only when the logger was built with
+        ``multiprocessing_safe=True`` and file logging enabled in the parent process.
+        It can be handed to worker processes so that their records are written by
+        this process's listener instead of by separate file handlers.
+
+        Returns:
+            Queue[LogRecord] | None:
+                The runtime's multiprocessing queue, or ``None`` when no
+                multiprocessing logging runtime is configured."""
+        multiprocessing_logging_runtime = self._multiprocessing_logging_runtime
+
+        if multiprocessing_logging_runtime is None:
+            return None
+
+        log_record_queue = multiprocessing_logging_runtime.log_record_queue
+
+        return log_record_queue
+
     def add_log_level(
         self,
         name: str,
@@ -393,9 +437,19 @@ class ApplicationLogger:
         Dynamic method lookup is case-insensitive. For example, registering
         ``NOTICE`` makes ``logger.notice(...)`` available.
 
+        Level names that collide with an existing ``ApplicationLogger`` attribute,
+        such as ``SHUTDOWN`` or ``LOG``, are rejected. Normal attribute lookup takes
+        precedence over dynamic level resolution, so such a level could never be
+        emitted through its dynamic method.
+
         Compatible console formatter color mappings are refreshed immediately after
         registration so the newly registered color can be used without rebuilding the
         application logger.
+
+        The level is also recorded in the ``SPECTRALOG_CUSTOM_LOG_LEVELS``
+        environment variable. Child processes started after this call inherit it,
+        and :func:`get_logger` re-registers the level when it rebuilds the logger in
+        such a child.
 
         Destination routing is intentionally not part of the custom-level definition.
         Routing is selected independently for each emitted record using the
@@ -414,6 +468,11 @@ class ApplicationLogger:
             severity:
                 Integer severity assigned to the custom level. This value is passed to
                 Python's logging machinery when records for the level are emitted.
+
+        Raises:
+            ValueError:
+                If the lowercased ``name`` matches an existing ``ApplicationLogger``
+                attribute.
 
         Example:
             Register a custom level::
@@ -446,6 +505,16 @@ class ApplicationLogger:
                     file=True,
                 )
         """
+        method_name = name.lower()
+
+        if hasattr(
+            type(self),
+            method_name,
+        ):
+            raise ValueError(
+                f"Log level name '{name}' conflicts with the existing " f"'{type(self).__name__}.{method_name}' attribute.",
+            )
+
         self._log_level_registry.register(
             name=name,
             color=color,
@@ -453,6 +522,49 @@ class ApplicationLogger:
         )
 
         self._refresh_console_colors()
+
+        self._remember_custom_log_level_for_child_processes(
+            name=name,
+            color=color,
+            severity=severity,
+        )
+
+    @staticmethod
+    def _remember_custom_log_level_for_child_processes(
+        name: str,
+        color: str,
+        severity: int,
+    ) -> None:
+        """Record a custom log level in the environment so child processes can re-register it.
+
+        Levels are stored as a JSON list in ``SPECTRALOG_CUSTOM_LOG_LEVELS``. An
+        existing entry with the same name is replaced, so registering the same level
+        again does not duplicate it.
+
+        Args:
+            name:
+                Name of the registered custom log level.
+
+            color:
+                Color associated with the custom log level.
+
+            severity:
+                Integer severity of the custom log level."""
+        stored_levels = load_custom_log_levels_from_environment()
+
+        remembered_levels = [stored_level for stored_level in stored_levels if stored_level["name"].upper() != name.upper()]
+
+        remembered_levels.append(
+            {
+                "name": name,
+                "color": color,
+                "severity": severity,
+            },
+        )
+
+        os.environ[SPECTRALOG_CUSTOM_LOG_LEVELS_ENVIRONMENT_VARIABLE] = json.dumps(
+            remembered_levels,
+        )
 
     def log(
         self,
@@ -1046,6 +1158,10 @@ class ApplicationLogger:
         or empty log file. When both the new-file flag and resolved file path are
         present, a warning is emitted containing the resulting file name.
 
+        The warning is attributed to the first call site outside the SpectraLog
+        package, typically the application's ``CreateSpectraLogger`` call, rather than
+        to SpectraLog's internal construction code.
+
         Args:
             logger_build_result:
                 Result returned by the logger builder containing the resolved log file
@@ -1055,7 +1171,36 @@ class ApplicationLogger:
 
             self.warning(
                 f"New log file created: {log_file_name}",
+                stacklevel=self._resolve_external_stacklevel(),
             )
+
+    @staticmethod
+    def _resolve_external_stacklevel() -> int:
+        """Return the ``stacklevel`` that attributes a record to the first non-SpectraLog caller.
+
+        The count is relative to a :meth:`warning` call made from
+        :meth:`_handle_new_log_file`: level ``2`` is ``_handle_new_log_file`` itself,
+        and each further frame inside the SpectraLog package adds one.
+
+        Returns:
+            int:
+                Stack level pointing at the first frame whose source file lies outside
+                the SpectraLog package. Falls back to the outermost frame reached."""
+        frame: FrameType | None = sys._getframe(1)
+        stacklevel = 2
+
+        while frame is not None:
+            frame_path = Path(frame.f_code.co_filename).resolve()
+
+            if not frame_path.is_relative_to(_SPECTRALOG_PACKAGE_DIRECTORY):
+                return stacklevel
+
+            frame = frame.f_back
+            stacklevel += 1
+
+        resolved_stacklevel = stacklevel - 1
+
+        return resolved_stacklevel
 
     def _refresh_console_colors(
         self,
@@ -1175,3 +1320,43 @@ class ApplicationLogger:
         )
 
         return prepared_keyword_arguments
+
+
+def load_custom_log_levels_from_environment() -> list[dict[str, Any]]:
+    """Return the custom log levels stored in the environment by this or a parent process.
+
+    Returns:
+        list[dict[str, Any]]:
+            Stored level definitions with ``name``, ``color`` and ``severity`` keys.
+            An empty list is returned when nothing is stored or the stored value is
+            invalid."""
+    serialized_levels = os.environ.get(
+        SPECTRALOG_CUSTOM_LOG_LEVELS_ENVIRONMENT_VARIABLE,
+    )
+
+    if not serialized_levels:
+        return []
+
+    try:
+        stored_levels = json.loads(
+            serialized_levels,
+        )
+    except ValueError:
+        return []
+
+    if not isinstance(
+        stored_levels,
+        list,
+    ):
+        return []
+
+    valid_levels = [
+        stored_level
+        for stored_level in stored_levels
+        if isinstance(stored_level, dict)
+        and isinstance(stored_level.get("name"), str)
+        and isinstance(stored_level.get("color"), str)
+        and isinstance(stored_level.get("severity"), int)
+    ]
+
+    return valid_levels

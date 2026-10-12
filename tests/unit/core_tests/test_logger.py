@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import call
 from unittest.mock import MagicMock
 from unittest.mock import patch
-
+import copy 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # noqa
 SRC_DIR = PROJECT_ROOT / "src"  # noqa
@@ -273,7 +273,7 @@ class UnitTestApplicationLogger(unittest.TestCase):
         self,
         atexit_register_mock: MagicMock,
     ) -> None:
-        """Verifies that construction emits a warning when the builder reports creation of a new log file."""
+        """Verifies that construction emits a warning attributed to the external caller when a new log file is created."""
         log_file_path = Path(
             "/tmp/application.log",
         )
@@ -297,7 +297,7 @@ class UnitTestApplicationLogger(unittest.TestCase):
                 SPECTRALOG_CONSOLE_ATTRIBUTE: True,
                 SPECTRALOG_FILE_ATTRIBUTE: True,
             },
-            stacklevel=2,
+            stacklevel=4,
         )
 
     @patch(
@@ -1581,6 +1581,7 @@ class UnitTestApplicationLogger(unittest.TestCase):
 
         warning_mock.assert_called_once_with(
             "New log file created: application.jsonl",
+            stacklevel=3,
         )
 
     @patch.object(
@@ -1821,3 +1822,138 @@ class UnitTestApplicationLogger(unittest.TestCase):
             },
             ("Expected the second compatible formatter to receive the " "current registry colors without losing existing entries."),
         )
+
+
+    @patch.object(
+        ApplicationLogger,
+        "_refresh_console_colors",
+    )
+    def test_add_log_level_rejects_names_that_clash_with_logger_attributes(
+        self,
+        refresh_console_colors_mock: MagicMock,
+    ) -> None:
+        """Verifies that add_log_level rejects level names matching existing ApplicationLogger attributes."""
+        application_logger = self._create_application_logger()
+
+        clashing_level_names = [
+            "SHUTDOWN",
+            "LOG",
+            "EXCEPTION",
+            "add_log_level",
+            "Info",
+        ]
+
+        for clashing_level_name in clashing_level_names:
+            with self.subTest(
+                level_name=clashing_level_name,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Log level name '{clashing_level_name}' conflicts",
+                    msg=(f"Expected add_log_level() to reject '{clashing_level_name}' " "because it matches an existing ApplicationLogger attribute."),
+                ):
+                    application_logger.add_log_level(
+                        name=clashing_level_name,
+                        color="blue",
+                        severity=35,
+                    )
+
+        self.log_level_registry.register.assert_not_called()
+        refresh_console_colors_mock.assert_not_called()
+        
+        
+    def test_dynamic_lookup_rejects_private_names_without_recursion(
+        self,
+    ) -> None:
+        """Verifies that underscore attribute lookups fail fast instead of recursing through the registry."""
+        uninitialized_application_logger = ApplicationLogger.__new__(
+            ApplicationLogger,
+        )
+
+        with self.assertRaises(
+            AttributeError,
+            msg="Expected a private attribute lookup on an uninitialized logger to raise AttributeError.",
+        ):
+            getattr(
+                uninitialized_application_logger,
+                "_log_level_registry",
+            )
+
+        application_logger = self._create_application_logger()
+
+        copied_application_logger = copy.copy(
+            application_logger,
+        )
+
+        self.assertIsInstance(
+            copied_application_logger,
+            ApplicationLogger,
+            "Expected copy.copy() to complete without RecursionError.",
+        )
+        
+    def test_new_log_file_warning_is_attributed_to_caller_outside_spectralog(
+        self,
+    ) -> None:
+        """Verifies that the new-log-file warning points at the external call site, not SpectraLog internals."""
+        captured_records: list[logging.LogRecord] = []
+
+        class CapturingHandler(logging.Handler):
+            def emit(
+                self,
+                record: logging.LogRecord,
+            ) -> None:
+                captured_records.append(
+                    record,
+                )
+
+        real_logger = logging.getLogger(
+            "spectralog.tests.new_log_file_stacklevel",
+        )
+
+        real_logger.handlers = [
+            CapturingHandler(),
+        ]
+
+        real_logger.setLevel(
+            logging.DEBUG,
+        )
+
+        real_logger.propagate = False
+
+        self.logger = real_logger
+
+        logger_build_result = self._create_build_result(
+            log_file_path=Path(
+                "/tmp/application.log",
+            ),
+            is_new_log_file=True,
+        )
+
+        self._create_application_logger(
+            logger_build_result=logger_build_result,
+        )
+
+        self.assertEqual(
+            len(captured_records),
+            1,
+            "Expected exactly one new-log-file warning to be emitted.",
+        )
+
+        warning_record = captured_records[0]
+
+        self.assertEqual(
+            warning_record.getMessage(),
+            "New log file created: application.log",
+            "Expected the captured record to be the new-log-file warning.",
+        )
+
+        self.assertEqual(
+            Path(warning_record.pathname).resolve(),
+            Path(__file__).resolve(),
+            (
+                "Expected the warning to be attributed to the caller outside the "
+                f"spectralog package, but it pointed at {warning_record.pathname}:{warning_record.lineno}."
+            ),
+        )
+
+        real_logger.handlers = []

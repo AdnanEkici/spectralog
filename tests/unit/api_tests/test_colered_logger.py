@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
+import os
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # noqa
 SRC_DIR = PROJECT_ROOT / "src"  # noqa
@@ -24,6 +25,18 @@ from spectralog.levels.log_level_registry import LogLevelRegistry  # noqa: E402
 
 
 class UnitTestColoredLogger(unittest.TestCase):
+    
+    def setUp(self):
+        environment_patcher = patch.dict(os.environ, clear=False)
+        environment_patcher.start()
+        self.addCleanup(environment_patcher.stop)
+
+        store_patcher = patch(
+            "spectralog.api.colored_logger._store_configuration_for_child_processes"
+        )
+        self.mock_store_configuration = store_patcher.start()
+        self.addCleanup(store_patcher.stop)
+    
     @patch(
         "spectralog.api.colored_logger.ApplicationLogger.get_instance",
     )
@@ -319,6 +332,7 @@ class UnitTestColoredLogger(unittest.TestCase):
 
         logger_builder_factory.create.assert_called_once_with(
             configuration=configuration,
+            worker_log_record_queue=None,
         )
 
     @patch(

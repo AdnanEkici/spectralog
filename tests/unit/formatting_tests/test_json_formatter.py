@@ -966,3 +966,40 @@ class UnitTestJsonLoggerFormatter(unittest.TestCase):
             "None",
             "Expected LogRecord.getMessage() to convert a None message to its string representation.",
         )
+
+
+    def test_create_log_data_uses_exc_text_when_exc_info_is_missing(
+        self,
+    ) -> None:
+        """Verifies that pre-rendered exception text is reported when exc_info is unavailable."""
+        json_logger_formatter = JsonLoggerFormatter(
+            JsonLoggerConfiguration(),
+        )
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="Request failed",
+            args=None,
+            exc_info=None,
+        )
+
+        record.exc_text = "Traceback (most recent call last):\nValueError: boom"
+
+        log_data = json_logger_formatter._create_log_data(
+            record,
+        )
+
+        self.assertEqual(
+            log_data["exception"],
+            record.exc_text,
+            "Expected the exception field to fall back to exc_text.",
+        )
+
+        self.assertEqual(
+            log_data["message"],
+            "Request failed",
+            "Expected the message field to exclude the exception text.",
+        )

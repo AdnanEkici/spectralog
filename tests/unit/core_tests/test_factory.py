@@ -516,6 +516,7 @@ class UnitTestApplicationLoggerBuilderFactory(unittest.TestCase):
 
         log_file_path_resolver_class_mock.assert_called_once_with()
 
+   
     @patch(
         "spectralog.core.factory.ApplicationLoggerBuilder",
     )
@@ -536,6 +537,10 @@ class UnitTestApplicationLoggerBuilderFactory(unittest.TestCase):
 
         file_handler_factory = MagicMock(
             spec=FileHandlerFactory,
+        )
+
+        queue_file_handler_factory = MagicMock(
+            spec=QueueFileHandlerFactory,
         )
 
         multiprocessing_handler_factory = MagicMock(
@@ -563,20 +568,24 @@ class UnitTestApplicationLoggerBuilderFactory(unittest.TestCase):
                     return_value=file_handler_factory,
                 ):
                     with patch(
-                        "spectralog.core.factory.MultiprocessingHandlerFactory",
-                        return_value=multiprocessing_handler_factory,
+                        "spectralog.core.factory.QueueFileHandlerFactory",
+                        return_value=queue_file_handler_factory,
                     ):
                         with patch(
-                            "spectralog.core.factory.SyslogHandlerFactory",
-                            return_value=syslog_handler_factory,
+                            "spectralog.core.factory.MultiprocessingHandlerFactory",
+                            return_value=multiprocessing_handler_factory,
                         ):
                             with patch(
-                                "spectralog.core.factory.LogFilePathResolver",
-                                return_value=log_file_path_resolver,
+                                "spectralog.core.factory.SyslogHandlerFactory",
+                                return_value=syslog_handler_factory,
                             ):
-                                self.application_logger_builder_factory.create(
-                                    configuration=configuration,
-                                )
+                                with patch(
+                                    "spectralog.core.factory.LogFilePathResolver",
+                                    return_value=log_file_path_resolver,
+                                ):
+                                    self.application_logger_builder_factory.create(
+                                        configuration=configuration,
+                                    )
 
         application_logger_builder_class_mock.assert_called_once_with(
             configuration=configuration,
@@ -586,6 +595,8 @@ class UnitTestApplicationLoggerBuilderFactory(unittest.TestCase):
             multiprocessing_handler_factory=multiprocessing_handler_factory,
             syslog_handler_factory=syslog_handler_factory,
             log_file_path_resolver=log_file_path_resolver,
+            queue_file_handler_factory=queue_file_handler_factory,
+            worker_log_record_queue=None,
         )
 
     @patch(

@@ -1,12 +1,57 @@
 from __future__ import annotations
 
 import logging
+from logging import LogRecord
 from logging.handlers import SysLogHandler
 
 from spectralog.configuration.configuration import LoggerConfiguration
 from spectralog.configuration.syslog_configuration import SyslogConfiguration
+from spectralog.core.log_routing import SPECTRALOG_CONSOLE_ATTRIBUTE
+from spectralog.core.log_routing import SPECTRALOG_FILE_ATTRIBUTE
 from spectralog.core.protocols import LoggerFormatterFactoryProtocol
 from spectralog.formatting.relative_path_filter import RelativePathFilter
+
+
+class SyslogRoutingFilter(logging.Filter):
+    """Suppress syslog output for records routed away from every local destination.
+
+    SpectraLog logging methods accept ``console`` and ``file`` routing arguments
+    and store them on each :class:`logging.LogRecord`. A record logged with both
+    destinations disabled is not meant to be emitted anywhere, so it is rejected
+    for syslog output as well.
+
+    Records without routing metadata, such as records emitted directly through
+    the standard library, default to enabled and are accepted."""
+
+    def filter(
+        self,
+        record: LogRecord,
+    ) -> bool:
+        """Return whether the record should be emitted to syslog.
+
+        Args:
+            record:
+                Log record being evaluated by the syslog handler.
+
+        Returns:
+            bool:
+                ``True`` when at least one of the record's console or file routing
+                flags is enabled; otherwise ``False``."""
+        console_enabled = getattr(
+            record,
+            SPECTRALOG_CONSOLE_ATTRIBUTE,
+            True,
+        )
+
+        file_enabled = getattr(
+            record,
+            SPECTRALOG_FILE_ATTRIBUTE,
+            True,
+        )
+
+        is_routed = bool(console_enabled or file_enabled)
+
+        return is_routed
 
 
 class SyslogHandlerFactory:
@@ -26,6 +71,9 @@ class SyslogHandlerFactory:
 
     A shared :class:`RelativePathFilter` is attached to the handler so that format
     strings containing ``%(relative_path)s`` can be used safely for syslog output.
+
+    A :class:`SyslogRoutingFilter` is also attached so that records logged with
+    both ``console=False`` and ``file=False`` are not sent to syslog.
 
     This factory is responsible only for constructing and configuring the syslog
     handler. Attaching the handler to the application logger is handled by
@@ -61,8 +109,9 @@ class SyslogHandlerFactory:
 
         The syslog destination address, facility, and socket type are obtained from
         ``syslog_configuration``. The handler's minimum logging level is set from the
-        effective SpectraLog logger level, and the shared
-        :class:`RelativePathFilter` is attached before the handler is returned.
+        effective SpectraLog logger level. A :class:`SyslogRoutingFilter` and the
+        shared :class:`RelativePathFilter` are attached before the handler is
+        returned.
 
         The configured socket type determines the transport used by
         :class:`logging.handlers.SysLogHandler`, such as UDP with
@@ -100,6 +149,10 @@ class SyslogHandlerFactory:
 
         syslog_handler.setFormatter(
             formatter,
+        )
+
+        syslog_handler.addFilter(
+            SyslogRoutingFilter(),
         )
 
         syslog_handler.addFilter(

@@ -23,7 +23,8 @@ class JsonLoggerFormatter(logging.Formatter):
     :class:`JsonLoggerConfiguration`.
 
     Exception information is included automatically when the log record contains
-    ``exc_info``.
+    ``exc_info``, or ``exc_text`` for records that crossed a process boundary
+    through SpectraLog's multiprocessing queue.
 
     The formatter serializes each record with :func:`json.dumps` using
     ``ensure_ascii=False`` so that Unicode characters are preserved. Values that
@@ -97,8 +98,9 @@ class JsonLoggerFormatter(logging.Formatter):
         - ``thread_id`` and ``thread_name`` contain thread metadata.
 
         When the record contains exception information, an ``exception`` field is
-        added containing the formatted traceback text produced by
-        :meth:`logging.Formatter.formatException`.
+        added. It contains the traceback text produced by
+        :meth:`logging.Formatter.formatException` from ``exc_info``, or the
+        pre-rendered ``exc_text`` when ``exc_info`` is no longer available.
 
         Args:
             record:
@@ -138,6 +140,9 @@ class JsonLoggerFormatter(logging.Formatter):
             )
 
             log_data["exception"] = exception_text
+
+        elif record.exc_text:
+            log_data["exception"] = record.exc_text
 
         created_log_data = log_data
 

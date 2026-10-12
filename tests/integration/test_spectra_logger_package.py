@@ -140,6 +140,9 @@ print(created_logger is retrieved_logger)
     ) -> None:
         """Verifies that get_logger rejects access before explicit logger initialization."""
         script = """
+import os
+os.environ.pop("SPECTRALOG_CONFIGURATION", None)
+os.environ.pop("SPECTRALOG_CUSTOM_LOG_LEVELS", None)
 from spectralog import get_logger
 from spectralog.exceptions.exceptions import (
     SpectraApplicationLoggerNotInitializedError,
