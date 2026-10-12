@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import base64
+import os
+import pickle
+from collections.abc import Callable
+from logging import LogRecord
+from multiprocessing.queues import Queue
 from pathlib import Path
+from typing import Any
 
 from spectralog.configuration.configuration import LoggerConfiguration
 from spectralog.configuration.json_logger_configuration import JsonLoggerConfiguration
@@ -8,7 +15,12 @@ from spectralog.configuration.rich_console_configuration import RichConsoleConfi
 from spectralog.configuration.syslog_configuration import SyslogConfiguration
 from spectralog.core.factory import ApplicationLoggerBuilderFactory
 from spectralog.core.logger import ApplicationLogger
+from spectralog.core.logger import load_custom_log_levels_from_environment
+from spectralog.exceptions.exceptions import SpectraApplicationLoggerNotInitializedError
+from spectralog.exceptions.exceptions import SpectraApplicationLoggerReconfigurationError
 from spectralog.levels.log_level_registry import LogLevelRegistry
+
+SPECTRALOG_CONFIGURATION_ENVIRONMENT_VARIABLE = "SPECTRALOG_CONFIGURATION"
 
 
 def CreateSpectraLogger(
@@ -40,6 +52,18 @@ def CreateSpectraLogger(
     application's entry point. After initialization, other modules should use
     :func:`get_logger` to retrieve the existing logger rather than calling
     ``CreateSpectraLogger`` again.
+
+    Worker processes should be configured with :func:`get_worker_initializer`.
+    With ``multiprocessing_safe=True``, workers configured this way forward their
+    file records to this process's queue, so a single listener writes the log
+    file.
+
+    As a fallback for workers that cannot be given an initializer, the
+    configuration is also stored in the ``SPECTRALOG_CONFIGURATION`` environment
+    variable. Child processes inherit the environment, so :func:`get_logger` in
+    such a child rebuilds an equivalently configured logger, including custom
+    levels registered before the child was started. That fallback logger writes
+    the log file through its own handlers.
 
     Console logging is always configured. When ``save_logs`` is enabled,
     SpectraLog additionally creates a file handler using either plain-text or
@@ -89,8 +113,9 @@ def CreateSpectraLogger(
         log_file_name:
             Optional custom log file name. When omitted, SpectraLog generates
             a daily file name from the current date. When JSON logging is
-            enabled, the file suffix is changed to ``.jsonl`` regardless of
-            the supplied suffix. Defaults to ``None``.
+            enabled, a recognized log extension is replaced with ``.jsonl``
+            and any other suffix is kept with ``.jsonl`` appended. Defaults to
+            ``None``.
 
         save_logs:
             Enables persistent file logging when ``True``. When ``False``,
@@ -103,11 +128,9 @@ def CreateSpectraLogger(
             queue and listener infrastructure when ``True``. This prevents
             the application's logger from writing directly to the file
             handler in the initializing process and ensures queued records
-            are flushed during logger shutdown. Defaults to ``False``.
-
-            This option applies to the multiprocessing runtime created by
-            this logger instance. Independently initialized processes do not
-            automatically share the same queue or listener.
+            are flushed during logger shutdown. Workers configured with
+            :func:`get_worker_initializer` share this queue. Defaults to
+            ``False``.
 
         syslog_configuration:
             Optional :class:`SyslogConfiguration` describing the remote
@@ -203,6 +226,200 @@ def CreateSpectraLogger(
         backup_count=backup_count,
     )
 
+    application_logger = _create_application_logger(
+        configuration,
+    )
+
+    _store_configuration_for_child_processes(
+        configuration,
+    )
+
+    return application_logger
+
+
+def get_logger() -> ApplicationLogger:
+    """Return the process-local SpectraLog application logger.
+
+    Returns the existing :class:`ApplicationLogger` singleton when SpectraLog has
+    already been initialized, either by :func:`CreateSpectraLogger` or by the
+    worker initializer returned from :func:`get_worker_initializer`.
+
+    When no logger exists in the current process but a parent process stored its
+    configuration in the ``SPECTRALOG_CONFIGURATION`` environment variable, an
+    equivalently configured logger is rebuilt from that configuration and the
+    parent's custom log levels are registered on it.
+
+    Raises:
+        SpectraApplicationLoggerNotInitializedError:
+            If SpectraLog has not been initialized in this process and no parent
+            configuration is available in the environment.
+
+    Returns:
+        ApplicationLogger:
+            The process-local SpectraLog application logger instance. Repeated
+            calls return the same singleton instance for the lifetime of the
+            process.
+
+    Example:
+        Retrieve the existing logger from another module::
+
+            from spectralog import get_logger
+
+            logger = get_logger()
+            logger.info("Processing started")
+    """
+    try:
+        application_logger = ApplicationLogger.get_instance()
+    except SpectraApplicationLoggerNotInitializedError:
+        inherited_configuration = _load_configuration_from_parent_process()
+
+        if inherited_configuration is None:
+            raise
+
+        try:
+            application_logger = _create_application_logger(
+                inherited_configuration,
+            )
+        except SpectraApplicationLoggerReconfigurationError:
+            application_logger = ApplicationLogger.get_instance()
+        else:
+            _register_custom_log_levels(
+                application_logger,
+                load_custom_log_levels_from_environment(),
+            )
+
+    return application_logger
+
+
+def get_worker_initializer() -> tuple[Callable[..., None], tuple[Any, ...]]:
+    """Return an initializer that configures SpectraLog in worker processes.
+
+    The returned callable and arguments are intended for
+    ``multiprocessing.Pool(initializer=..., initargs=...)``, or for calling at the
+    start of a :class:`multiprocessing.Process` target. Call this after
+    :func:`CreateSpectraLogger` and after registering any custom log levels, and
+    before starting the workers.
+
+    When the parent logger uses ``multiprocessing_safe=True`` with file logging,
+    workers forward their file records to the parent's queue, so the parent's
+    listener is the only writer of the log file. Otherwise workers build an
+    equivalently configured logger of their own.
+
+    Raises:
+        SpectraApplicationLoggerNotInitializedError:
+            If SpectraLog has not been initialized in this process.
+
+    Returns:
+        tuple[Callable[..., None], tuple[Any, ...]]:
+            :func:`initialize_spectralog_worker` and the arguments to call it with.
+
+    Example:
+        Configure pool workers::
+
+            logger = CreateSpectraLogger(
+                multiprocessing_safe=True,
+                log_file_name="training.log",
+            )
+
+            initializer, initargs = get_worker_initializer()
+
+            with multiprocessing.get_context("spawn").Pool(
+                4,
+                initializer=initializer,
+                initargs=initargs,
+            ) as pool:
+                pool.map(work, items)
+    """
+    application_logger = ApplicationLogger.get_instance()
+
+    configuration = _load_configuration_from_parent_process()
+
+    if configuration is None:
+        raise SpectraApplicationLoggerNotInitializedError(
+            "No SpectraLog configuration is available. Call CreateSpectraLogger() before get_worker_initializer().",
+        )
+
+    worker_initializer_arguments = (
+        configuration,
+        application_logger.multiprocessing_log_record_queue,
+        load_custom_log_levels_from_environment(),
+    )
+
+    return initialize_spectralog_worker, worker_initializer_arguments
+
+
+def initialize_spectralog_worker(
+    configuration: LoggerConfiguration,
+    log_record_queue: Queue[LogRecord] | None,
+    custom_log_levels: list[dict[str, Any]],
+) -> None:
+    """Configure SpectraLog in a worker process.
+
+    This function is normally obtained through :func:`get_worker_initializer`
+    rather than called with hand-built arguments.
+
+    When ``log_record_queue`` is supplied, file records are forwarded to that
+    parent-owned queue and the worker does not open the log file. Otherwise the
+    worker builds a logger that writes according to ``configuration``. Custom log
+    levels from the parent are registered on the worker's logger.
+
+    If the worker already has an application logger, for example because it was
+    started with the ``fork`` method and inherited the parent's logger, nothing is
+    changed.
+
+    Args:
+        configuration:
+            The parent's logger configuration.
+
+        log_record_queue:
+            The parent's multiprocessing log queue, or ``None`` when the parent does
+            not use multiprocessing-safe file logging.
+
+        custom_log_levels:
+            Custom log level definitions with ``name``, ``color`` and ``severity``
+            keys."""
+    if ApplicationLogger._instance is not None:
+        return
+
+    try:
+        application_logger = _create_application_logger(
+            configuration,
+            worker_log_record_queue=log_record_queue,
+        )
+    except SpectraApplicationLoggerReconfigurationError:
+        return
+
+    _register_custom_log_levels(
+        application_logger,
+        custom_log_levels,
+    )
+
+    _store_configuration_for_child_processes(
+        configuration,
+    )
+
+
+def _create_application_logger(
+    configuration: LoggerConfiguration,
+    worker_log_record_queue: Queue[LogRecord] | None = None,
+) -> ApplicationLogger:
+    """Build and register the application logger singleton from a configuration.
+
+    Args:
+        configuration:
+            Complete logger configuration used to compose the logger builder.
+
+        worker_log_record_queue:
+            Optional parent-owned queue. When supplied, the logger forwards file
+            records to it instead of writing the log file.
+
+    Raises:
+        SpectraApplicationLoggerReconfigurationError:
+            If the application logger has already been initialized.
+
+    Returns:
+        ApplicationLogger:
+            The initialized process-local application logger."""
     log_level_registry = LogLevelRegistry()
 
     logger_builder_factory = ApplicationLoggerBuilderFactory(
@@ -211,6 +428,7 @@ def CreateSpectraLogger(
 
     logger_builder = logger_builder_factory.create(
         configuration=configuration,
+        worker_log_record_queue=worker_log_record_queue,
     )
 
     application_logger = ApplicationLogger.get_instance(
@@ -221,41 +439,78 @@ def CreateSpectraLogger(
     return application_logger
 
 
-def get_logger() -> ApplicationLogger:
-    """Return the process-local SpectraLog application logger.
+def _register_custom_log_levels(
+    application_logger: ApplicationLogger,
+    custom_log_levels: list[dict[str, Any]],
+) -> None:
+    """Register custom log level definitions on an application logger.
 
-    Returns the existing :class:`ApplicationLogger` singleton when SpectraLog has
-    already been initialized. This is the recommended way for application modules
-    to access the logger after the initial call to :func:`CreateSpectraLogger`.
+    Args:
+        application_logger:
+            Logger on which the levels are registered.
 
-    Raises:
-        SpectraApplicationLoggerNotInitializedError:
-            If SpectraLog has not yet been initialized with
-            :func:`CreateSpectraLogger`.
+        custom_log_levels:
+            Level definitions with ``name``, ``color`` and ``severity`` keys."""
+    for custom_log_level in custom_log_levels:
+        application_logger.add_log_level(
+            name=custom_log_level["name"],
+            color=custom_log_level["color"],
+            severity=custom_log_level["severity"],
+        )
+
+
+def _store_configuration_for_child_processes(
+    configuration: LoggerConfiguration,
+) -> None:
+    """Store ``configuration`` in the environment so child processes can rebuild the logger.
+
+    The configuration is pickled and base64-encoded into
+    ``SPECTRALOG_CONFIGURATION``. Child processes inherit the variable at
+    creation time.
+
+    Args:
+        configuration:
+            Logger configuration to make available to child processes."""
+    serialized_configuration = base64.b64encode(
+        pickle.dumps(
+            configuration,
+        ),
+    ).decode(
+        "ascii",
+    )
+
+    os.environ[SPECTRALOG_CONFIGURATION_ENVIRONMENT_VARIABLE] = serialized_configuration
+
+
+def _load_configuration_from_parent_process() -> LoggerConfiguration | None:
+    """Load a logger configuration stored in the environment, if one is available.
 
     Returns:
-        ApplicationLogger:
-            The process-local SpectraLog application logger instance. Repeated
-            calls return the same singleton instance for the lifetime of the
-            process.
+        LoggerConfiguration | None:
+            The stored configuration, or ``None`` when the environment variable is
+            absent or does not contain a valid ``LoggerConfiguration``."""
+    serialized_configuration = os.environ.get(
+        SPECTRALOG_CONFIGURATION_ENVIRONMENT_VARIABLE,
+    )
 
-    Example:
-        Initialize SpectraLog once at application startup::
+    if not serialized_configuration:
+        return None
 
-            from spectralog import CreateSpectraLogger
+    try:
+        configuration = pickle.loads(
+            base64.b64decode(
+                serialized_configuration,
+            ),
+        )
+    except Exception:
+        return None
 
-            CreateSpectraLogger(
-                debug_mode=True,
-                log_file_name="application.log",
-            )
+    if not isinstance(
+        configuration,
+        LoggerConfiguration,
+    ):
+        return None
 
-        Retrieve the existing logger from another module::
+    loaded_configuration: LoggerConfiguration = configuration
 
-            from spectralog import get_logger
-
-            logger = get_logger()
-            logger.info("Processing started")
-    """
-    application_logger = ApplicationLogger.get_instance()
-
-    return application_logger
+    return loaded_configuration

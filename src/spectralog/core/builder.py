@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from logging import LogRecord
+from multiprocessing.queues import Queue
 
 from spectralog.configuration.configuration import LoggerConfiguration
 from spectralog.core.models import LoggerBuildResult
@@ -10,6 +12,7 @@ from spectralog.core.protocols import LogFilePathResolverProtocol
 from spectralog.core.protocols import MultiprocessingHandlerFactoryProtocol
 from spectralog.core.protocols import RichConsoleHandlerFactoryProtocol
 from spectralog.core.protocols import SyslogHandlerFactoryProtocol
+from spectralog.handlers.queue_file_handler_factory import QueueFileHandlerFactory
 
 
 class ApplicationLoggerBuilder:
@@ -37,6 +40,11 @@ class ApplicationLoggerBuilder:
     records are written either through a direct file handler or through
     SpectraLog's multiprocessing logging runtime.
 
+    When a ``worker_log_record_queue`` is supplied, the builder is operating in a
+    worker process. File output is then routed to that queue, which is owned by the
+    parent process's multiprocessing logging runtime, and no log file is opened or
+    resolved in the worker.
+
     When syslog configuration is present, a syslog handler is attached in addition
     to the configured console and file-related handlers.
 
@@ -59,6 +67,8 @@ class ApplicationLoggerBuilder:
         multiprocessing_handler_factory: MultiprocessingHandlerFactoryProtocol,
         syslog_handler_factory: SyslogHandlerFactoryProtocol,
         log_file_path_resolver: LogFilePathResolverProtocol,
+        queue_file_handler_factory: QueueFileHandlerFactory | None = None,
+        worker_log_record_queue: Queue[LogRecord] | None = None,
     ) -> None:
         """Initialize an application logger builder with its configuration and factories.
 
@@ -95,7 +105,26 @@ class ApplicationLoggerBuilder:
 
             log_file_path_resolver:
                 Resolver used to determine the effective log file path when
-                persistent file logging is enabled."""
+                persistent file logging is enabled.
+
+            queue_file_handler_factory:
+                Factory used to create the queue handler that forwards worker records
+                to the parent's queue. Required when ``worker_log_record_queue`` is
+                supplied.
+
+            worker_log_record_queue:
+                Parent-owned multiprocessing queue. When supplied, file output is
+                routed to this queue instead of a local file handler or runtime.
+
+        Raises:
+            ValueError:
+                If ``worker_log_record_queue`` is supplied without a
+                ``queue_file_handler_factory``."""
+        if worker_log_record_queue is not None and queue_file_handler_factory is None:
+            raise ValueError(
+                "A queue_file_handler_factory is required when a worker_log_record_queue is supplied.",
+            )
+
         self._configuration = configuration
         self._console_handler_factory = console_handler_factory
         self._rich_console_handler_factory = rich_console_handler_factory
@@ -103,6 +132,8 @@ class ApplicationLoggerBuilder:
         self._multiprocessing_handler_factory = multiprocessing_handler_factory
         self._syslog_handler_factory = syslog_handler_factory
         self._log_file_path_resolver = log_file_path_resolver
+        self._queue_file_handler_factory = queue_file_handler_factory
+        self._worker_log_record_queue = worker_log_record_queue
 
     def build(
         self,
@@ -118,11 +149,12 @@ class ApplicationLoggerBuilder:
         A Rich console handler is selected when Rich configuration is present;
         otherwise the standard console handler is used.
 
-        When file logging is enabled, the effective log path is resolved and inspected
-        to determine whether it represents a new or empty log file. File output is
-        then configured either through a direct file handler or through SpectraLog's
-        multiprocessing logging runtime, depending on the
-        ``multiprocessing_safe`` setting.
+        When file logging is enabled in a worker process, file records are forwarded
+        to the parent's queue and no log file is resolved or inspected. Otherwise the
+        effective log path is resolved and inspected to determine whether it
+        represents a new or empty log file, and file output is configured either
+        through a direct file handler or through SpectraLog's multiprocessing logging
+        runtime, depending on the ``multiprocessing_safe`` setting.
 
         If syslog configuration is present, a syslog handler is attached in addition
         to the console and file-related handlers.
@@ -139,8 +171,8 @@ class ApplicationLoggerBuilder:
             LoggerBuildResult:
                 The completed logger build result containing the configured
                 :class:`logging.Logger`, the resolved log file path when file logging
-                is enabled, whether that file is new or empty, and the optional
-                multiprocessing logging runtime.
+                is enabled outside a worker, whether that file is new or empty, and
+                the optional multiprocessing logging runtime.
 
         Note:
             Building a logger is destructive with respect to handlers already attached
@@ -179,30 +211,40 @@ class ApplicationLoggerBuilder:
         multiprocessing_logging_runtime = None
 
         if self._configuration.save_logs:
-            log_file_path = self._log_file_path_resolver.resolve(
-                self._configuration,
-            )
-
-            is_new_log_file = not log_file_path.exists() or log_file_path.stat().st_size == 0
-
-            if self._configuration.multiprocessing_safe:
-                multiprocessing_logging_runtime = self._multiprocessing_handler_factory.create(
-                    configuration=self._configuration,
-                    log_file_path=log_file_path,
+            if self._worker_log_record_queue is not None and self._queue_file_handler_factory is not None:
+                worker_queue_handler = self._queue_file_handler_factory.create(
+                    log_record_queue=self._worker_log_record_queue,
+                    log_level=self._configuration.log_level,
                 )
 
                 logger.addHandler(
-                    multiprocessing_logging_runtime.queue_handler,
+                    worker_queue_handler,
                 )
             else:
-                file_handler = self._file_handler_factory.create(
-                    configuration=self._configuration,
-                    log_file_path=log_file_path,
+                log_file_path = self._log_file_path_resolver.resolve(
+                    self._configuration,
                 )
 
-                logger.addHandler(
-                    file_handler,
-                )
+                is_new_log_file = not log_file_path.exists() or log_file_path.stat().st_size == 0
+
+                if self._configuration.multiprocessing_safe:
+                    multiprocessing_logging_runtime = self._multiprocessing_handler_factory.create(
+                        configuration=self._configuration,
+                        log_file_path=log_file_path,
+                    )
+
+                    logger.addHandler(
+                        multiprocessing_logging_runtime.queue_handler,
+                    )
+                else:
+                    file_handler = self._file_handler_factory.create(
+                        configuration=self._configuration,
+                        log_file_path=log_file_path,
+                    )
+
+                    logger.addHandler(
+                        file_handler,
+                    )
 
         syslog_configuration = self._configuration.syslog_configuration
 

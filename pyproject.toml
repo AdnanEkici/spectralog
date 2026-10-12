@@ -79,7 +79,7 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/AdnanEkici/Spectralog"
-Documentation = "https://YOUR_GITHUB_USERNAME.github.io/YOUR_REPOSITORY_NAME/"
+Documentation = "https://adnanekici.github.io/spectralog/"
 Repository = "https://github.com/AdnanEkici/Spectralog"
 Issues = "https://github.com/AdnanEkici/Spectralog/issues"
 

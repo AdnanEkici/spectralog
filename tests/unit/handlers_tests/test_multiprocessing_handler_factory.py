@@ -428,7 +428,9 @@ class UnitTestMultiprocessingHandlerFactory(unittest.TestCase):
 
         created_queue = self.multiprocessing_handler_factory._create_log_record_queue()
 
-        get_context_mock.assert_called_once_with()
+        get_context_mock.assert_called_once_with(
+            "spawn",
+        )
 
         self.assertIs(
             created_queue,
@@ -478,3 +480,17 @@ class UnitTestMultiprocessingHandlerFactory(unittest.TestCase):
 
         created_queue.close()
         created_queue.join_thread()
+
+    @patch(
+    "spectralog.handlers.multiprocessing_handler_factory.multiprocessing.get_context",
+    )
+    def test_create_log_record_queue_uses_spawn_context(
+        self,
+        get_context_mock: MagicMock,
+    ) -> None:
+        """Verifies that the log queue is created from the spawn context so it can be shared with any worker start method."""
+        self.multiprocessing_handler_factory._create_log_record_queue()
+
+        get_context_mock.assert_called_once_with(
+            "spawn",
+        )

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from logging import LogRecord
+from multiprocessing.queues import Queue
+
 from spectralog.configuration.configuration import LoggerConfiguration
 from spectralog.core.builder import ApplicationLoggerBuilder
 from spectralog.files.log_file_path_resolver import LogFilePathResolver
@@ -51,6 +54,10 @@ class ApplicationLoggerBuilderFactory:
     This allows the resulting builder to choose between direct file logging and
     queue-based multiprocessing logging according to the active configuration.
 
+    When a worker log record queue is supplied, the resulting builder forwards
+    file records from a worker process to that parent-owned queue instead of
+    writing the log file itself.
+
     Calling :meth:`create` constructs a new dependency graph and returns a fully
     composed :class:`ApplicationLoggerBuilder`. The logger itself is not created
     until the returned builder's :meth:`ApplicationLoggerBuilder.build` method is
@@ -75,6 +82,7 @@ class ApplicationLoggerBuilderFactory:
     def create(
         self,
         configuration: LoggerConfiguration,
+        worker_log_record_queue: Queue[LogRecord] | None = None,
     ) -> ApplicationLoggerBuilder:
         """Create a fully composed :class:`ApplicationLoggerBuilder`.
 
@@ -103,6 +111,11 @@ class ApplicationLoggerBuilderFactory:
                 The :class:`LoggerConfiguration` that will be associated with the
                 created builder and used when the builder later constructs the
                 application logger.
+
+            worker_log_record_queue:
+                Optional parent-owned multiprocessing queue. When supplied, the
+                created builder runs in worker mode and forwards file records to this
+                queue instead of opening the log file. Defaults to ``None``.
 
         Returns:
             ApplicationLoggerBuilder:
@@ -169,6 +182,8 @@ class ApplicationLoggerBuilderFactory:
             multiprocessing_handler_factory=multiprocessing_handler_factory,
             syslog_handler_factory=syslog_handler_factory,
             log_file_path_resolver=log_file_path_resolver,
+            queue_file_handler_factory=queue_file_handler_factory,
+            worker_log_record_queue=worker_log_record_queue,
         )
 
         created_logger_builder = logger_builder

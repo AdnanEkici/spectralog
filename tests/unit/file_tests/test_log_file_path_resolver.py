@@ -471,3 +471,102 @@ class UnitTestLogFilePathResolver(unittest.TestCase):
             Path("/tmp/logs/2026-08-25.jsonl"),
             ("Expected the daily JSON path resolver to produce a " ".jsonl file."),
         )
+
+
+    def test_resolve_custom_log_file_path_keeps_non_log_suffix_for_json_logging(
+        self,
+    ) -> None:
+        """Verifies that a dotted part of the custom name that is not a log extension is kept and .jsonl is appended."""
+        configuration = LoggerConfiguration(
+            log_file_name="service.v2",
+            json_logger_configuration=JsonLoggerConfiguration(),
+        )
+
+        resolved_log_file_path = self.log_file_path_resolver._resolve_custom_log_file_path(
+            configuration=configuration,
+            logs_directory=Path(
+                "/tmp/logs",
+            ),
+        )
+
+        self.assertEqual(
+            resolved_log_file_path,
+            Path("/tmp/logs/service.v2.jsonl"),
+            ("Expected JSON logging to keep the '.v2' part of the custom file " "name and append .jsonl instead of replacing it."),
+        )
+
+    def test_resolve_custom_log_file_path_keeps_multiple_dotted_parts_for_json_logging(
+        self,
+    ) -> None:
+        """Verifies that a custom name with several dotted parts keeps all of them when JSON logging is enabled."""
+        configuration = LoggerConfiguration(
+            log_file_name="release.2026.10",
+            json_logger_configuration=JsonLoggerConfiguration(),
+        )
+
+        resolved_log_file_path = self.log_file_path_resolver._resolve_custom_log_file_path(
+            configuration=configuration,
+            logs_directory=Path(
+                "/tmp/logs",
+            ),
+        )
+
+        self.assertEqual(
+            resolved_log_file_path,
+            Path("/tmp/logs/release.2026.10.jsonl"),
+            ("Expected JSON logging to keep every dotted part of the custom " "file name and append .jsonl."),
+        )
+
+    def test_resolve_custom_log_file_path_replaces_known_log_extensions_for_json_logging(
+        self,
+    ) -> None:
+        """Verifies that recognized log extensions are replaced with .jsonl when JSON logging is enabled."""
+        for log_file_name in (
+            "application.log",
+            "application.txt",
+            "application.json",
+            "application.jsonl",
+            "application.LOG",
+        ):
+            with self.subTest(
+                log_file_name=log_file_name,
+            ):
+                configuration = LoggerConfiguration(
+                    log_file_name=log_file_name,
+                    json_logger_configuration=JsonLoggerConfiguration(),
+                )
+
+                resolved_log_file_path = self.log_file_path_resolver._resolve_custom_log_file_path(
+                    configuration=configuration,
+                    logs_directory=Path(
+                        "/tmp/logs",
+                    ),
+                )
+
+                self.assertEqual(
+                    resolved_log_file_path,
+                    Path("/tmp/logs/application.jsonl"),
+                    f"Expected the '{log_file_name}' extension to be replaced with .jsonl.",
+                )
+
+    def test_resolve_keeps_non_log_suffix_unchanged_for_plain_text_logging(
+        self,
+    ) -> None:
+        """Verifies that plain-text logging leaves a dotted custom name such as service.v2 untouched."""
+        configuration = LoggerConfiguration(
+            log_file_name="service.v2",
+            json_logger_configuration=None,
+        )
+
+        resolved_log_file_path = self.log_file_path_resolver._resolve_custom_log_file_path(
+            configuration=configuration,
+            logs_directory=Path(
+                "/tmp/logs",
+            ),
+        )
+
+        self.assertEqual(
+            resolved_log_file_path,
+            Path("/tmp/logs/service.v2"),
+            "Expected plain-text logging to keep the custom file name unchanged.",
+        )

@@ -5,6 +5,15 @@ from pathlib import Path
 
 from spectralog.configuration.configuration import LoggerConfiguration
 
+_REPLACEABLE_LOG_FILE_EXTENSIONS = frozenset(
+    {
+        ".log",
+        ".txt",
+        ".json",
+        ".jsonl",
+    },
+)
+
 
 class LogFilePathResolver:
     """Resolve the effective file-system path used for SpectraLog file logging.
@@ -17,9 +26,11 @@ class LogFilePathResolver:
     that name is used relative to the configured logs directory. When no custom
     name is supplied, a daily file name is generated from the current local date.
 
-    JSON logging changes the effective file extension to ``.jsonl``. Plain-text
-    logging uses the supplied custom extension unchanged, or ``.log`` for
-    automatically generated daily files.
+    JSON logging changes the effective file extension to ``.jsonl``. A recognized
+    log extension in a custom file name is replaced, while any other dotted part of
+    the name is preserved and ``.jsonl`` is appended. Plain-text logging uses the
+    supplied custom name unchanged, or ``.log`` for automatically generated daily
+    files.
 
     The resolver is responsible only for determining the log file path and
     creating the top-level logs directory. It does not create or open the log file
@@ -77,8 +88,8 @@ class LogFilePathResolver:
         """Resolve a custom log file path within the configured logs directory.
 
         The configured ``log_file_name`` is appended to ``logs_directory``. When JSON
-        logging is enabled, the resulting path's suffix is replaced with ``.jsonl``
-        regardless of the extension supplied in the custom file name.
+        logging is enabled, the path is converted to a ``.jsonl`` file by
+        :meth:`_to_json_lines_path`.
 
         Args:
             configuration:
@@ -96,7 +107,7 @@ class LogFilePathResolver:
 
         Returns:
             Path:
-                The custom log file path, with a ``.jsonl`` suffix when JSON logging
+                The custom log file path, with a ``.jsonl`` extension when JSON logging
                 is enabled."""
         log_file_name = configuration.log_file_name
 
@@ -108,13 +119,42 @@ class LogFilePathResolver:
         log_file_path = logs_directory / log_file_name
 
         if configuration.json_logger_configuration is not None:
-            log_file_path = log_file_path.with_suffix(
-                ".jsonl",
+            log_file_path = self._to_json_lines_path(
+                log_file_path,
             )
 
         resolved_log_file_path = log_file_path
 
         return resolved_log_file_path
+
+    @staticmethod
+    def _to_json_lines_path(
+        log_file_path: Path,
+    ) -> Path:
+        """Convert a log file path to use the ``.jsonl`` extension.
+
+        A recognized log extension (``.log``, ``.txt``, ``.json`` or ``.jsonl``) is
+        replaced with ``.jsonl``. Any other suffix, such as the ``.v2`` in
+        ``service.v2``, is treated as part of the file name and kept, and ``.jsonl``
+        is appended.
+
+        Args:
+            log_file_path:
+                Log file path whose extension should be converted.
+
+        Returns:
+            Path:
+                The path with a ``.jsonl`` extension."""
+        if log_file_path.suffix.lower() in _REPLACEABLE_LOG_FILE_EXTENSIONS:
+            json_lines_path = log_file_path.with_suffix(
+                ".jsonl",
+            )
+        else:
+            json_lines_path = log_file_path.with_name(
+                f"{log_file_path.name}.jsonl",
+            )
+
+        return json_lines_path
 
     def _resolve_daily_log_file_path(
         self,

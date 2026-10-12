@@ -124,10 +124,12 @@ class MultiprocessingHandlerFactory:
     ) -> Queue[LogRecord]:
         """Create the multiprocessing queue used to transport log records.
 
-        The queue is created from Python's active multiprocessing context rather than
-        by instantiating :class:`multiprocessing.Queue` directly. This allows the
-        queue to follow the process start method and multiprocessing context selected
-        for the current application.
+        The queue is always created from the ``spawn`` multiprocessing context. A
+        spawn-context queue can be shared with worker processes started by any
+        start method: ``fork`` children inherit it directly, while ``spawn`` and
+        ``forkserver`` children receive it through pickling. A queue created from the
+        ``fork`` context, the default on Linux before Python 3.14, cannot be sent to
+        ``spawn`` workers and fails with a ``SemLock`` context error.
 
         The returned queue is used by the queue handler to publish log records and by
         the queue listener to consume them.
@@ -135,9 +137,11 @@ class MultiprocessingHandlerFactory:
         Returns:
             Queue[LogRecord]:
                 A multiprocessing queue suitable for transporting logging records
-                between the queue handler and queue listener.
+                between the queue handler, queue listener, and worker processes.
         """
-        multiprocessing_context = multiprocessing.get_context()
+        multiprocessing_context = multiprocessing.get_context(
+            "spawn",
+        )
 
         log_record_queue = cast(
             "Queue[LogRecord]",

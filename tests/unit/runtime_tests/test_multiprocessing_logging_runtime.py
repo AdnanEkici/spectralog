@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import multiprocessing
+import subprocess
+import sys
+import textwrap
 import unittest
 from logging.handlers import QueueHandler
 from logging.handlers import QueueListener
 from multiprocessing.queues import Queue
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import call
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -416,4 +421,113 @@ class UnitTestMultiprocessingLoggingRuntime(unittest.TestCase):
         self.assertFalse(
             is_running,
             ("Expected a runtime backed by a real multiprocessing queue " "to report not running after stop() completes."),
+        )
+
+    def test_start_registers_stop_as_multiprocessing_exit_finalizer(
+        self,
+    ) -> None:
+        """Verifies that start registers stop to run before multiprocessing closes its queues on process exit."""
+        with patch(
+            "spectralog.runtime.multiprocessing_logging_runtime.Finalize",
+        ) as finalize:
+            self.multiprocessing_logging_runtime.start()
+            self.multiprocessing_logging_runtime.start()
+
+        finalize.assert_called_once()
+
+        finalize_arguments = finalize.call_args
+
+        self.assertEqual(
+            finalize_arguments.args[1],
+            self.multiprocessing_logging_runtime.stop,
+            "Expected start() to register the runtime's stop method as the finalizer callback.",
+        )
+
+        self.assertGreater(
+            finalize_arguments.kwargs["exitpriority"],
+            10,
+            ("Expected the finalizer to outrank multiprocessing's queue close finalizer " "(exitpriority 10) so the listener stops first."),
+        )
+
+    def test_spawned_child_process_exits_without_listener_thread_error(
+        self,
+    ) -> None:
+        """Verifies that a spawned child owning a multiprocessing-safe logger exits without a listener thread traceback."""
+        source_directory = Path(__file__).resolve().parents[3] / "src"
+
+        child_script = textwrap.dedent(
+            """
+            import multiprocessing
+            import sys
+            import threading
+            import time
+
+            sys.path.insert(0, sys.argv[1])
+
+
+            def child(logs_directory):
+                from spectralog import CreateSpectraLogger
+
+                logger = CreateSpectraLogger(
+                    multiprocessing_safe=True,
+                    logs_directory=logs_directory,
+                    log_file_name="child.log",
+                )
+                logger.info("child record", console=False)
+
+                # Keep the child alive after multiprocessing's exit finalizers run,
+                # as slow framework teardown (e.g. CUDA/NCCL) does.
+                threading.Thread(target=time.sleep, args=(0.5,)).start()
+
+
+            if __name__ == "__main__":
+                process = multiprocessing.get_context("spawn").Process(
+                    target=child,
+                    args=(sys.argv[2],),
+                )
+                process.start()
+                process.join()
+                sys.exit(process.exitcode)
+            """,
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            script_path = Path(temporary_directory) / "spawn_child.py"
+            script_path.write_text(
+                child_script,
+                encoding="utf-8",
+            )
+
+            completed_process = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    str(source_directory),
+                    temporary_directory,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            log_file_content = (Path(temporary_directory) / "child.log").read_text(
+                encoding="utf-8",
+            )
+
+        self.assertEqual(
+            completed_process.returncode,
+            0,
+            f"Expected the spawned child to exit cleanly. stderr:\n{completed_process.stderr}",
+        )
+
+        self.assertNotIn(
+            "Traceback",
+            completed_process.stderr,
+            f"Expected no listener thread traceback on child exit. stderr:\n{completed_process.stderr}",
+        )
+
+        self.assertIn(
+            "child record",
+            log_file_content,
+            "Expected the child's record to be drained to the log file before exit.",
         )

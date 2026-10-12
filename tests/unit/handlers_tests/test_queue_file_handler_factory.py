@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import pickle
 import sys
 import unittest
 from logging.handlers import QueueHandler
@@ -16,6 +17,7 @@ SRC_DIR = PROJECT_ROOT / "src"  # noqa
 sys.path.insert(0, str(SRC_DIR))  # noqa
 
 
+from spectralog.handlers.queue_file_handler_factory import ExceptionPreservingQueueHandler  # noqa: E402
 from spectralog.handlers.queue_file_handler_factory import QueueFileHandlerFactory  # noqa: E402
 
 
@@ -24,7 +26,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         self.queue_file_handler_factory = QueueFileHandlerFactory()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_returns_created_queue_handler(
         self,
@@ -59,7 +61,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_constructs_queue_handler_with_supplied_queue(
         self,
@@ -90,7 +92,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_sets_info_log_level(
         self,
@@ -123,7 +125,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_sets_debug_log_level(
         self,
@@ -156,7 +158,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_sets_warning_log_level(
         self,
@@ -189,7 +191,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_sets_error_log_level(
         self,
@@ -222,7 +224,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_sets_critical_log_level(
         self,
@@ -255,7 +257,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_sets_custom_numeric_log_level(
         self,
@@ -290,7 +292,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         log_record_queue.join_thread()
 
     @patch(
-        "spectralog.handlers.queue_file_handler_factory.QueueHandler",
+        "spectralog.handlers.queue_file_handler_factory.ExceptionPreservingQueueHandler",
     )
     def test_create_configures_only_supplied_queue_handler(
         self,
@@ -365,7 +367,7 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
         second_log_record_queue.join_thread()
 
     def test_create_returns_real_queue_handler_when_not_mocked(self) -> None:
-        """Verifies that create constructs a real QueueHandler backed by the supplied multiprocessing queue."""
+        """Verifies that create constructs a real exception-preserving QueueHandler backed by the supplied multiprocessing queue."""
         multiprocessing_context = multiprocessing.get_context()
 
         log_record_queue = cast(
@@ -380,8 +382,8 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
 
         self.assertIsInstance(
             created_handler,
-            QueueHandler,
-            ("Expected create() to return a real QueueHandler when the " "QueueHandler constructor is not mocked."),
+            ExceptionPreservingQueueHandler,
+            ("Expected create() to return an ExceptionPreservingQueueHandler when the " "handler constructor is not mocked."),
         )
 
         self.assertIs(
@@ -400,3 +402,100 @@ class UnitTestQueueFileHandlerFactory(unittest.TestCase):
 
         log_record_queue.close()
         log_record_queue.join_thread()
+
+
+class UnitTestExceptionPreservingQueueHandler(unittest.TestCase):
+    def setUp(self) -> None:
+        self.queue_handler = ExceptionPreservingQueueHandler(
+            MagicMock(),
+        )
+
+    def _create_exception_record(self) -> logging.LogRecord:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            exception_info = sys.exc_info()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="Request %s failed",
+            args=("ABC",),
+            exc_info=exception_info,
+        )
+
+        created_record = record
+
+        return created_record
+
+    def test_prepare_keeps_traceback_out_of_message(
+        self,
+    ) -> None:
+        """Verifies that prepare interpolates the message without appending the traceback to it."""
+        prepared_record = self.queue_handler.prepare(
+            self._create_exception_record(),
+        )
+
+        self.assertEqual(
+            prepared_record.getMessage(),
+            "Request ABC failed",
+            "Expected the prepared message to contain only the interpolated log message.",
+        )
+
+        self.assertNotIn(
+            "Traceback",
+            prepared_record.msg,
+            "Expected the traceback not to be folded into the prepared message.",
+        )
+
+    def test_prepare_stores_traceback_in_exc_text(
+        self,
+    ) -> None:
+        """Verifies that prepare renders the exception into exc_text and clears exc_info."""
+        prepared_record = self.queue_handler.prepare(
+            self._create_exception_record(),
+        )
+
+        self.assertIsNone(
+            prepared_record.exc_info,
+            "Expected exc_info to be cleared so the record can be pickled.",
+        )
+
+        self.assertIn(
+            "ValueError: boom",
+            prepared_record.exc_text or "",
+            "Expected the rendered traceback to be preserved in exc_text.",
+        )
+
+    def test_prepare_returns_picklable_copy_without_mutating_original(
+        self,
+    ) -> None:
+        """Verifies that prepare returns a picklable copy and leaves the original record unchanged."""
+        original_record = self._create_exception_record()
+
+        prepared_record = self.queue_handler.prepare(
+            original_record,
+        )
+
+        pickle.dumps(
+            prepared_record,
+        )
+
+        self.assertIsNot(
+            prepared_record,
+            original_record,
+            "Expected prepare() to return a copy of the record.",
+        )
+
+        self.assertIsNotNone(
+            original_record.exc_info,
+            "Expected the original record to keep its exc_info.",
+        )
+
+        self.assertEqual(
+            original_record.args,
+            ("ABC",),
+            "Expected the original record to keep its args.",
+        )

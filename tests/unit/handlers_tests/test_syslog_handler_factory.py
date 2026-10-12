@@ -6,6 +6,7 @@ import sys
 import unittest
 from logging.handlers import SysLogHandler
 from pathlib import Path
+from unittest.mock import ANY
 from unittest.mock import call
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -16,8 +17,11 @@ sys.path.insert(0, str(SRC_DIR))  # noqa
 
 from spectralog.configuration.configuration import LoggerConfiguration  # noqa: E402
 from spectralog.configuration.syslog_configuration import SyslogConfiguration  # noqa: E402
+from spectralog.core.log_routing import SPECTRALOG_CONSOLE_ATTRIBUTE  # noqa: E402
+from spectralog.core.log_routing import SPECTRALOG_FILE_ATTRIBUTE  # noqa: E402
 from spectralog.core.protocols import LoggerFormatterFactoryProtocol  # noqa: E402
 from spectralog.handlers.syslog_handler_factory import SyslogHandlerFactory  # noqa: E402
+from spectralog.handlers.syslog_handler_factory import SyslogRoutingFilter  # noqa: E402
 from spectralog.formatting.relative_path_filter import RelativePathFilter  # noqa: E402
 
 
@@ -342,7 +346,7 @@ class UnitTestSyslogHandlerFactory(unittest.TestCase):
         self,
         syslog_handler_class_mock: MagicMock,
     ) -> None:
-        """Verifies that create configures the level, formatter, and relative path filter in the expected order."""
+        """Verifies that create configures the level, formatter, routing filter, and relative path filter in the expected order."""
         logger_configuration = LoggerConfiguration(
             debug_mode=True,
         )
@@ -368,6 +372,9 @@ class UnitTestSyslogHandlerFactory(unittest.TestCase):
                 self.formatter,
             ),
             call.addFilter(
+                ANY,
+            ),
+            call.addFilter(
                 self.relative_path_filter,
             ),
         ]
@@ -375,7 +382,13 @@ class UnitTestSyslogHandlerFactory(unittest.TestCase):
         self.assertEqual(
             syslog_handler.method_calls,
             expected_method_calls,
-            ("Expected the syslog handler to be configured in the order " "setLevel(), setFormatter(), then addFilter()."),
+            ("Expected the syslog handler to be configured in the order " "setLevel(), setFormatter(), routing addFilter(), then relative path addFilter()."),
+        )
+
+        self.assertIsInstance(
+            syslog_handler.method_calls[2].args[0],
+            SyslogRoutingFilter,
+            "Expected the first filter attached to the syslog handler to be a SyslogRoutingFilter.",
         )
 
     @patch(
@@ -405,6 +418,120 @@ class UnitTestSyslogHandlerFactory(unittest.TestCase):
             syslog_configuration=syslog_configuration,
         )
 
-        syslog_handler.addFilter.assert_called_once_with(
+        syslog_handler.addFilter.assert_any_call(
             self.relative_path_filter,
+        )
+
+    @patch(
+        "spectralog.handlers.syslog_handler_factory.SysLogHandler",
+    )
+    def test_create_adds_syslog_routing_filter(
+        self,
+        syslog_handler_class_mock: MagicMock,
+    ) -> None:
+        """Verifies that create attaches a SyslogRoutingFilter to the syslog handler."""
+        logger_configuration = LoggerConfiguration()
+
+        syslog_configuration = SyslogConfiguration()
+
+        syslog_handler = MagicMock(
+            spec=SysLogHandler,
+        )
+
+        syslog_handler_class_mock.return_value = syslog_handler
+
+        self.syslog_handler_factory.create(
+            logger_configuration=logger_configuration,
+            syslog_configuration=syslog_configuration,
+        )
+
+        attached_filters = [attached_filter_call.args[0] for attached_filter_call in syslog_handler.addFilter.call_args_list]
+
+        self.assertTrue(
+            any(isinstance(attached_filter, SyslogRoutingFilter) for attached_filter in attached_filters),
+            "Expected create() to attach a SyslogRoutingFilter to the syslog handler.",
+        )
+
+
+class UnitTestSyslogRoutingFilter(unittest.TestCase):
+    def setUp(self) -> None:
+        self.syslog_routing_filter = SyslogRoutingFilter()
+
+    def _create_record(
+        self,
+        **routing_attributes: bool,
+    ) -> logging.LogRecord:
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="message",
+            args=None,
+            exc_info=None,
+        )
+
+        for attribute_name, attribute_value in routing_attributes.items():
+            setattr(
+                record,
+                attribute_name,
+                attribute_value,
+            )
+
+        created_record = record
+
+        return created_record
+
+    def test_filter_rejects_record_with_console_and_file_disabled(
+        self,
+    ) -> None:
+        """Verifies that records routed away from both console and file are not sent to syslog."""
+        record = self._create_record(
+            **{
+                SPECTRALOG_CONSOLE_ATTRIBUTE: False,
+                SPECTRALOG_FILE_ATTRIBUTE: False,
+            },
+        )
+
+        self.assertFalse(
+            self.syslog_routing_filter.filter(record),
+            "Expected a record with console=False and file=False to be rejected for syslog.",
+        )
+
+    def test_filter_accepts_record_with_single_destination_enabled(
+        self,
+    ) -> None:
+        """Verifies that records with at least one enabled destination are sent to syslog."""
+        routing_combinations = [
+            (True, False),
+            (False, True),
+            (True, True),
+        ]
+
+        for console_enabled, file_enabled in routing_combinations:
+            with self.subTest(
+                console=console_enabled,
+                file=file_enabled,
+            ):
+                record = self._create_record(
+                    **{
+                        SPECTRALOG_CONSOLE_ATTRIBUTE: console_enabled,
+                        SPECTRALOG_FILE_ATTRIBUTE: file_enabled,
+                    },
+                )
+
+                self.assertTrue(
+                    self.syslog_routing_filter.filter(record),
+                    "Expected a record with at least one enabled destination to be accepted for syslog.",
+                )
+
+    def test_filter_accepts_record_without_routing_metadata(
+        self,
+    ) -> None:
+        """Verifies that records emitted without SpectraLog routing metadata are sent to syslog."""
+        record = self._create_record()
+
+        self.assertTrue(
+            self.syslog_routing_filter.filter(record),
+            "Expected a record without routing metadata to be accepted for syslog.",
         )

@@ -5,7 +5,13 @@ from logging import LogRecord
 from logging.handlers import QueueHandler
 from logging.handlers import QueueListener
 from multiprocessing.queues import Queue
+from multiprocessing.util import Finalize
 from threading import RLock
+
+# multiprocessing closes its queues from finalizers with exitpriority 10 when a
+# child process exits. Higher priorities run first, so the listener is stopped
+# while the queue is still open.
+_STOP_EXIT_PRIORITY = 100
 
 
 class MultiprocessingLoggingRuntime:
@@ -27,6 +33,10 @@ class MultiprocessingLoggingRuntime:
     listener when necessary, then closes the queue handler and multiprocessing
     queue, waits for the queue's feeder thread to terminate, and marks the runtime
     as closed.
+
+    The multiprocessing queue is exposed through :attr:`log_record_queue` so that
+    worker processes can be configured to forward their records to this runtime's
+    listener.
 
     A closed runtime cannot be started again. Both :meth:`start` and :meth:`stop`
     are safe to call repeatedly without duplicating lifecycle operations."""
@@ -89,6 +99,26 @@ class MultiprocessingLoggingRuntime:
 
         return is_running
 
+    @property
+    def log_record_queue(self) -> Queue[LogRecord]:
+        """Return the multiprocessing queue consumed by this runtime's listener.
+
+        Worker processes can attach a queue handler for this queue so that their
+        records are written by the parent's listener and file handler rather than
+        by a file handler of their own.
+
+        The queue must be passed to worker processes when they are created, for
+        example through :class:`multiprocessing.Process` arguments or a pool
+        initializer.
+
+        Returns:
+            Queue[LogRecord]:
+                The multiprocessing queue that transports log records to the
+                listener."""
+        log_record_queue = self._log_record_queue
+
+        return log_record_queue
+
     def start(self) -> None:
         """Start the multiprocessing queue listener.
 
@@ -104,6 +134,16 @@ class MultiprocessingLoggingRuntime:
             if not self._is_running and not self._is_closed:
                 self._queue_listener.start()
                 self._is_running = True
+
+                # In multiprocessing child processes (Python 3.12 and earlier),
+                # multiprocessing closes the queue before atexit runs
+                # ApplicationLogger.shutdown, so the listener thread dies with
+                # EOFError/OSError and can drop records still in the queue.
+                Finalize(
+                    self,
+                    self.stop,
+                    exitpriority=_STOP_EXIT_PRIORITY,
+                )
 
     def stop(self) -> None:
         """Stop the multiprocessing logging runtime and release its resources.
