@@ -3,9 +3,9 @@
 The disable_application_logging decorator is intended for tests that execute
 real application code which normally initializes and uses SpectraLog.
 
-It allows that code to keep using the normal logging API while preventing real
-logging infrastructure, files, handlers, and other logging side effects from
-being created during the test.
+It allows that code to keep using the normal logging API, including custom
+log levels, while preventing real logging infrastructure, files, handlers,
+and other logging side effects from being created during the test.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRECTORY = PROJECT_ROOT / "src"
 LOGS_DIRECTORY = PROJECT_ROOT / "logs"
+LOG_FILE_NAME = "disabled-log-example.log"
 
 sys.path.insert(
     0,
@@ -35,10 +36,16 @@ class ExampleApplication:
         self,
     ) -> None:
         """Initialize the application's SpectraLog configuration."""
-        CreateSpectraLogger(
+        logger = CreateSpectraLogger(
             save_logs=True,
             logs_directory=LOGS_DIRECTORY,
-            log_file_name="disabled-log-example.log",
+            log_file_name=LOG_FILE_NAME,
+        )
+
+        logger.add_log_level(
+            name="SUCCESS",
+            color="bold_green",
+            severity=25,
         )
 
     def execute(
@@ -49,6 +56,15 @@ class ExampleApplication:
 
         logger.info(
             "Application started",
+        )
+
+        logger.success(  # type: ignore[attr-defined]
+            "Application task completed",
+        )
+
+        logger.log(
+            "SUCCESS",
+            "SUCCESS emitted through logger.log()",
         )
 
         logger.warning(
@@ -73,7 +89,7 @@ class ExampleApplicationTest(unittest.TestCase):
         application.initialize_logging()
         application.execute()
 
-        log_file_path = LOGS_DIRECTORY / "disabled-example.log"
+        log_file_path = LOGS_DIRECTORY / LOG_FILE_NAME
 
         self.assertFalse(
             log_file_path.exists(),
@@ -96,6 +112,32 @@ class ExampleApplicationTest(unittest.TestCase):
         self.assertTrue(
             logger._logger.disabled,
             "Expected the fallback logger to be disabled.",
+        )
+
+    def test_custom_log_level_can_be_used_while_disabled(
+        self,
+    ) -> None:
+        """Verify that custom levels register and emit on the disabled logger."""
+        logger = get_logger()
+
+        logger.add_log_level(
+            name="NOTICE",
+            color="purple",
+            severity=35,
+        )
+
+        logger.notice(  # type: ignore[attr-defined]
+            "This NOTICE message is suppressed",
+        )
+
+        logger.log(
+            "NOTICE",
+            "This NOTICE message is also suppressed",
+        )
+
+        self.assertTrue(
+            logger._logger.disabled,
+            "Expected the fallback logger to stay disabled with a custom level.",
         )
 
 
