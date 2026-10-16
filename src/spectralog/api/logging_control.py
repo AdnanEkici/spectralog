@@ -4,6 +4,7 @@ import logging
 import unittest
 from collections.abc import Callable
 from functools import wraps
+from typing import Any
 from typing import cast
 from typing import ParamSpec
 from typing import TypeVar
@@ -29,6 +30,111 @@ FunctionReturnType = TypeVar(
 )
 
 
+_NO_OP_LOGGING_METHOD_NAMES: tuple[str, ...] = (
+    "log",
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "critical",
+    "exception",
+)
+
+
+def _no_op_logging_method(
+    *args: object,
+    **kwargs: object,
+) -> None:
+    """Accept any logging call and discard it.
+
+    This function replaces :class:`ApplicationLogger` logging methods while
+    SpectraLog is disabled or silenced. It accepts the same positional and
+    keyword arguments as any SpectraLog logging method, including routing
+    options such as ``console`` and ``file``, and intentionally does nothing.
+
+    Args:
+        *args:
+            Positional arguments supplied to the replaced logging method.
+
+        **kwargs:
+            Keyword arguments supplied to the replaced logging method.
+    """
+
+
+def _no_op_getattr(
+    self: ApplicationLogger,
+    attribute_name: str,
+) -> Callable[..., None]:
+    """Resolve any public dynamic log-level method to a no-op method.
+
+    This function replaces :meth:`ApplicationLogger.__getattr__` while
+    SpectraLog is disabled or silenced. Application code may therefore call
+    custom log-level methods such as ``logger.success(...)`` even when the
+    corresponding level was registered by setup code that the test never runs.
+
+    Private attribute names are still rejected so internal attribute lookups
+    and accidental private access keep failing normally.
+
+    Args:
+        self:
+            The application logger on which the attribute lookup occurred.
+
+        attribute_name:
+            The name of the missing attribute being resolved.
+
+    Raises:
+        AttributeError:
+            If ``attribute_name`` starts with an underscore.
+
+    Returns:
+        Callable[..., None]:
+            A logging method that accepts any arguments and does nothing.
+    """
+    if attribute_name.startswith("_"):
+        raise AttributeError(
+            f"'{type(self).__name__}' has no attribute '{attribute_name}'.",
+        )
+
+    return _no_op_logging_method
+
+
+def _create_no_op_logging_patches() -> list[Any]:
+    """Create patches that replace every SpectraLog logging method with a no-op.
+
+    The returned patches replace the built-in logging methods ``log``,
+    ``debug``, ``info``, ``warning``, ``error``, ``critical``, and
+    ``exception``, together with dynamic custom-level resolution through
+    ``__getattr__``. Non-logging methods such as ``add_log_level`` and
+    ``shutdown`` keep their real behavior.
+
+    The patches are created but not started. Callers are responsible for
+    starting them and for stopping them in reverse order, which restores the
+    original :class:`ApplicationLogger` methods.
+
+    Returns:
+        list[Any]:
+            Unstarted patch objects for every replaced logging method.
+    """
+    logging_method_patches: list[Any] = [
+        patch.object(
+            ApplicationLogger,
+            method_name,
+            new=_no_op_logging_method,
+        )
+        for method_name in _NO_OP_LOGGING_METHOD_NAMES
+    ]
+
+    logging_method_patches.append(
+        patch.object(
+            ApplicationLogger,
+            "__getattr__",
+            new=_no_op_getattr,
+        ),
+    )
+
+    return logging_method_patches
+
+
 def disable_application_logging(
     test_class: TestCaseClass,
 ) -> TestCaseClass:
@@ -47,6 +153,14 @@ def disable_application_logging(
     SpectraLog's ``atexit`` registration is also suppressed for the lifetime of
     the decorated test class so test execution does not accumulate shutdown
     callbacks.
+
+    Every :class:`ApplicationLogger` logging method is replaced with a no-op
+    for the lifetime of the decorated test class. This covers ``log``,
+    ``debug``, ``info``, ``warning``, ``error``, ``critical``, ``exception``,
+    and every dynamic custom-level method such as ``logger.success(...)``.
+    Custom levels therefore do not need to be registered in tests, even when
+    the application registers them in setup code the test never runs. The
+    original methods are restored when the test class finishes.
 
     The :class:`ApplicationLogger` singleton is isolated independently for each
     test method. Before each test, any previously existing singleton is preserved
@@ -98,6 +212,10 @@ def disable_application_logging(
                         "This message produces no logging output",
                     )
 
+                    logger.success(
+                        "Custom levels work without registration",
+                    )
+
                     self.assertTrue(
                         True,
                         "Expected application execution to succeed.",
@@ -128,6 +246,10 @@ def disable_application_logging(
 
         Singleton isolation occurs per test method, allowing multiple tests in one
         decorated class to initialize SpectraLog independently.
+
+        Because logging methods are no-ops, misspelled custom level names such
+        as ``logger.sucess(...)`` do not fail inside decorated tests. They still
+        fail normally outside the decorator.
     """
     original_set_up_class = test_class.setUpClass
     original_tear_down_class = test_class.tearDownClass
@@ -186,6 +308,17 @@ def disable_application_logging(
         logger_build_patch.start()
         atexit_register_patch.start()
 
+        no_op_logging_patches = _create_no_op_logging_patches()
+
+        for no_op_logging_patch in no_op_logging_patches:
+            no_op_logging_patch.start()
+
+        setattr(
+            cls,
+            "_spectralog_no_op_logging_patches",
+            no_op_logging_patches,
+        )
+
         setattr(
             cls,
             "_spectralog_logger_build_patch",
@@ -201,6 +334,9 @@ def disable_application_logging(
         try:
             original_set_up_class()
         except Exception:
+            for no_op_logging_patch in reversed(no_op_logging_patches):
+                no_op_logging_patch.stop()
+
             try:
                 atexit_register_patch.stop()
             finally:
@@ -222,9 +358,17 @@ def disable_application_logging(
             "_spectralog_atexit_register_patch",
         )
 
+        no_op_logging_patches = getattr(
+            cls,
+            "_spectralog_no_op_logging_patches",
+        )
+
         try:
             original_tear_down_class()
         finally:
+            for no_op_logging_patch in reversed(no_op_logging_patches):
+                no_op_logging_patch.stop()
+
             try:
                 atexit_register_patch.stop()
             finally:
@@ -456,6 +600,11 @@ def silence_application_logging(
     Any temporary application logger created while the decorated function runs
     is shut down before the previous singleton state is restored.
 
+    Every :class:`ApplicationLogger` logging method, including dynamic
+    custom-level methods such as ``logger.success(...)``, is replaced with a
+    no-op while the decorated function runs. Custom levels therefore do not
+    need to be registered first. The original methods are restored afterward.
+
     The previous logging state is restored even if the decorated function raises
     an exception.
 
@@ -609,9 +758,14 @@ def silence_application_logging(
             side_effect=get_instance,
         )
 
+        no_op_logging_patches = _create_no_op_logging_patches()
+
         logger_build_patch.start()
         atexit_register_patch.start()
         get_instance_patch.start()
+
+        for no_op_logging_patch in no_op_logging_patches:
+            no_op_logging_patch.start()
 
         try:
             result = function(
@@ -631,6 +785,9 @@ def silence_application_logging(
 
                 if previous_application_logger_instance is not None and previous_underlying_logger_disabled is not None:
                     previous_application_logger_instance._logger.disabled = previous_underlying_logger_disabled
+
+                for no_op_logging_patch in reversed(no_op_logging_patches):
+                    no_op_logging_patch.stop()
 
                 get_instance_patch.stop()
                 atexit_register_patch.stop()
