@@ -102,6 +102,7 @@ class UnitTestColoredLogger(unittest.TestCase):
             date_format="%Y-%m-%d %H:%M:%S",
             max_bytes=20 * (1024**2),
             backup_count=1,
+            level_colors=None,
         )
 
     @patch(
@@ -177,6 +178,7 @@ class UnitTestColoredLogger(unittest.TestCase):
             date_format="%d/%m/%Y %H:%M:%S",
             max_bytes=4096,
             backup_count=7,
+            level_colors={"INFO": "blue", "WARNING": "yellow"},
         )
 
         logger_configuration_class_mock.assert_called_once_with(
@@ -196,6 +198,7 @@ class UnitTestColoredLogger(unittest.TestCase):
             date_format="%d/%m/%Y %H:%M:%S",
             max_bytes=4096,
             backup_count=7,
+            level_colors={"INFO": "blue", "WARNING": "yellow"},
         )
 
     @patch(
@@ -213,7 +216,7 @@ class UnitTestColoredLogger(unittest.TestCase):
         application_logger_builder_factory_class_mock: MagicMock,
         get_instance_mock: MagicMock,
     ) -> None:
-        """Verifies that CreateSpectraLogger constructs a LogLevelRegistry for the logger instance."""
+        """Verifies that CreateSpectraLogger constructs a LogLevelRegistry with no color overrides by default."""
         log_level_registry = MagicMock(
             spec=LogLevelRegistry,
         )
@@ -237,7 +240,9 @@ class UnitTestColoredLogger(unittest.TestCase):
 
         CreateSpectraLogger()
 
-        log_level_registry_class_mock.assert_called_once_with()
+        log_level_registry_class_mock.assert_called_once_with(
+            default_colors=None,
+        )
 
     @patch(
         "spectralog.api.colored_logger.ApplicationLogger.get_instance",
@@ -784,4 +789,82 @@ class UnitTestColoredLogger(unittest.TestCase):
             supplied_logger_builder,
             logger_builder,
             ("Expected ApplicationLogger.get_instance() to receive the " "exact builder created by ApplicationLoggerBuilderFactory."),
+        )
+
+    @patch(
+        "spectralog.api.colored_logger.ApplicationLogger.get_instance",
+    )
+    @patch(
+        "spectralog.api.colored_logger.ApplicationLoggerBuilderFactory",
+    )
+    @patch(
+        "spectralog.api.colored_logger.LogLevelRegistry",
+    )
+    def test_create_spectra_logger_passes_level_colors_to_log_level_registry(
+        self,
+        log_level_registry_class_mock: MagicMock,
+        application_logger_builder_factory_class_mock: MagicMock,
+        get_instance_mock: MagicMock,
+    ) -> None:
+        """Verifies that CreateSpectraLogger forwards level_colors to LogLevelRegistry as default_colors."""
+        level_colors = {
+            "INFO": "blue",
+        }
+
+        log_level_registry = MagicMock(
+            spec=LogLevelRegistry,
+        )
+
+        logger_builder_factory = MagicMock(
+            spec=ApplicationLoggerBuilderFactory,
+        )
+
+        logger_builder = MagicMock(
+            spec=ApplicationLoggerBuilder,
+        )
+
+        application_logger = MagicMock(
+            spec=ApplicationLogger,
+        )
+
+        log_level_registry_class_mock.return_value = log_level_registry
+        application_logger_builder_factory_class_mock.return_value = logger_builder_factory
+        logger_builder_factory.create.return_value = logger_builder
+        get_instance_mock.return_value = application_logger
+
+        CreateSpectraLogger(
+            level_colors=level_colors,
+        )
+
+        log_level_registry_class_mock.assert_called_once_with(
+            default_colors=level_colors,
+        )
+
+    @patch(
+        "spectralog.api.colored_logger.ApplicationLogger.get_instance",
+    )
+    def test_create_spectra_logger_applies_level_colors_to_real_registry(
+        self,
+        get_instance_mock: MagicMock,
+    ) -> None:
+        """Verifies that level_colors overrides the matching default colors in a real LogLevelRegistry."""
+        CreateSpectraLogger(
+            save_logs=False,
+            level_colors={
+                "info": "blue",
+            },
+        )
+
+        log_level_registry = get_instance_mock.call_args.kwargs["log_level_registry"]
+
+        self.assertEqual(
+            log_level_registry.colors,
+            {
+                "DEBUG": "cyan",
+                "INFO": "blue",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "bold_red",
+            },
+            ("Expected level_colors to override only the supplied level " "colors and keep the remaining defaults."),
         )

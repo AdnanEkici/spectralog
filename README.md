@@ -45,6 +45,7 @@ logger.info("Processing request")
 - [JSON Logging](#json-logging)
 - [Rich Console Logging](#rich-console-logging)
 - [Syslog Logging](#syslog-logging)
+- [Level Colors](#level-colors)
 - [Custom Log Levels](#custom-log-levels)
 - [Multiprocessing-Safe File Logging](#multiprocessing-safe-file-logging)
 - [Silencing Logging](#silencing-logging)
@@ -76,7 +77,7 @@ logger.info("Processing request")
 
 **Destinations**
 
-- Colored console output through `colorlog`
+- Colored console output through `colorlog`, with configurable level colors including xterm 256 colors
 - Rotating file logging with configurable size, backup count, directory and file name
 - Automatic daily log file names
 - Structured JSON Lines (`.jsonl`) with configurable metadata, exception serialization and Unicode-safe output
@@ -90,6 +91,7 @@ logger.info("Processing request")
 
 **Levels**
 
+- Default level colors overridable at creation time with `level_colors`
 - Custom log levels registered at runtime, each with its own color
 - Custom levels exposed as methods, for example `logger.notice(...)`
 - Custom levels carried over to child processes
@@ -474,6 +476,65 @@ Anything that accepts standard syslog input works, including Splunk, Elastic, Gr
 A typical deployment sends SpectraLog's syslog output over UDP or TCP to a collector or agent, which forwards it to the platform of your choice.
 
 
+## Level Colors
+
+The colored console gives each built-in level a default color:
+
+| Level | Default color |
+| :-- | :-- |
+| `DEBUG` | `cyan` |
+| `INFO` | `green` |
+| `WARNING` | `bold_yellow` |
+| `ERROR` | `red` |
+| `CRITICAL` | `bold_red` |
+
+Pass `level_colors` to replace any of them. Levels you leave out keep their defaults:
+
+```python
+from spectralog import CreateSpectraLogger
+
+logger = CreateSpectraLogger(
+    level_colors={
+        "INFO": "blue",
+        "WARNING": "purple",
+    },
+)
+```
+
+### Named Colors
+
+Any single color name that `colorlog` supports works, for example `black`, `red`, `green`, `yellow`, `blue`, `purple`, `cyan` and `white`, with optional `bold_`, `thin_` or `light_` prefixes such as `bold_red` or `light_blue`.
+
+### xterm 256 Colors
+
+Terminals with 256-color support also accept the xterm palette, using `fg_0` to `fg_255`:
+
+```python
+logger = CreateSpectraLogger(
+    level_colors={
+        "DEBUG": "fg_245",      # grey
+        "INFO": "fg_45",        # turquoise
+        "WARNING": "fg_214",    # orange
+        "ERROR": "fg_196",      # bright red
+        "CRITICAL": "fg_201",   # magenta
+    },
+)
+```
+
+Named colors and xterm codes can be mixed in the same mapping. The same xterm codes are accepted by `add_log_level(color=...)` for custom levels.
+
+### Rules
+
+- Level names are case-insensitive, so `"info"` and `"INFO"` are the same.
+- Only the built-in `DEBUG`, `INFO`, `WARNING`, `ERROR` and `CRITICAL` levels can be set here. Custom levels get their color from `add_log_level(...)`. An unknown name raises `SpectraLogLevelNotFoundError`.
+- Each value must be one color name. Combined values such as `"red,bg_white"` and unsupported names raise `InvalidSpectraLogColorError`.
+- Colors apply to the standard colored console. Log files, JSON Lines, syslog and Rich console output do not use them.
+- Workers attached with `get_worker_initializer()` and children that call `get_logger()` inherit the parent's level colors.
+
+See `examples/custom_level_colors.py` and `examples/custom_level_colors_xterm256.py`.
+
+![xterm 256-color palette](assets/xterm_256_palette.png)
+
 ## Custom Log Levels
 
 Register a level at runtime, then call it as a method or through `log`:
@@ -495,7 +556,7 @@ A name that clashes with an existing logger attribute, such as `log`, `shutdown`
 
 **Uniqueness:** a name or a severity that is already registered raises `SpectraLogLevelAlreadyExistsError`.
 
-**Colors** must be colors that `colorlog` supports. After registration, the console formatter is refreshed so the new color applies immediately.
+**Colors** must be colors that `colorlog` supports, including xterm 256 colors such as `fg_208`. After registration, the console formatter is refreshed so the new color applies immediately.
 
 **Child processes:** levels registered in the parent are available in child processes started afterwards, both in workers attached with `get_worker_initializer()` and in children that call `get_logger()` directly.
 
@@ -636,7 +697,7 @@ All SpectraLog exceptions inherit from `SpectraLogError` in `spectralog.exceptio
 | `SpectraApplicationLoggerReconfigurationError` | `CreateSpectraLogger(...)` is called again after initialization |
 | `SpectraApplicationLoggerAlreadyInitializedError` | `ApplicationLogger` is constructed directly, bypassing its lifecycle |
 | `SpectraLogLevelAlreadyExistsError` | A custom level name or severity is already registered |
-| `SpectraLogLevelNotFoundError` | A level name cannot be resolved |
+| `SpectraLogLevelNotFoundError` | A level name cannot be resolved, including an unknown name in `level_colors` |
 | `InvalidSpectraLogLevelNameError` | A level name breaks the naming rules |
 | `InvalidSpectraLogLevelSeverityError` | A severity is not a positive integer |
 | `InvalidSpectraLogColorError` | A color is not supported by `colorlog` |
@@ -673,6 +734,7 @@ CreateSpectraLogger(
     date_format="%Y-%m-%d %H:%M:%S",
     max_bytes=20 * (1024**2),
     backup_count=1,
+    level_colors=None,
 )
 ```
 
@@ -694,6 +756,7 @@ CreateSpectraLogger(
 | `date_format` | `str` | `"%Y-%m-%d %H:%M:%S"` | Timestamp format |
 | `max_bytes` | `int` | `20 * (1024**2)` | Size before rollover |
 | `backup_count` | `int` | `1` | Rotated files kept |
+| `level_colors` | `dict[str, str] \| None` | `None` | Overrides for built-in level colors; named or xterm 256 (`fg_0`–`fg_255`). See [Level Colors](#level-colors) |
 
 The options of the three configuration classes are listed under [JSON Logging](#json-logging), [Rich Console Logging](#rich-console-logging) and [Syslog Logging](#syslog-logging).
 
@@ -874,6 +937,8 @@ spectralog/
 │   ├── conf.py
 │   └── index.rst
 ├── examples/
+│   ├── custom_level_colors.py
+│   ├── custom_level_colors_xterm256.py
 │   ├── custom_log_levels.py
 │   ├── destination_routing.py
 │   ├── disable_application_logging.py
