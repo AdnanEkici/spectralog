@@ -92,6 +92,12 @@ class LoggerConfiguration:
         backup_count:
             Number of rotated backup log files retained by the rotating file
             handler. Defaults to ``1``.
+
+        level_colors:
+            Optional mapping of built-in level names (DEBUG, INFO, WARNING,
+            ERROR, CRITICAL) to colorlog-compatible color names. Supplied
+            entries override SpectraLog's default level colors; omitted levels
+            keep their defaults. Defaults to ``None``.
     """
 
     debug_mode: bool = False
@@ -110,6 +116,7 @@ class LoggerConfiguration:
     date_format: str = "%Y-%m-%d %H:%M:%S"
     max_bytes: int = 20 * (1024**2)
     backup_count: int = 1
+    level_colors: dict[str, str] | None = None
 
     @property
     def log_level(self) -> int:

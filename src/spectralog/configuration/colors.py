@@ -37,7 +37,7 @@ class LoggerColor(str, Enum):
     """
 
     DEBUG = "cyan"
-    INFO = "green"
-    WARNING = "bold_yellow"
+    INFO = "blue"
+    WARNING = "yellow"
     ERROR = "red"
     CRITICAL = "bold_red"

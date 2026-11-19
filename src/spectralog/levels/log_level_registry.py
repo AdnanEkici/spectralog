@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from threading import Lock
 
 import colorlog
@@ -48,15 +49,32 @@ class LogLevelRegistry:
     level names and their configured color values for use by compatible console
     formatters."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        default_colors: Mapping[str, str] | None = None,
+    ) -> None:
         """Initialize the registry with SpectraLog's standard log levels.
 
         Creates the internal synchronization lock and level mapping, then registers
         the built-in DEBUG, INFO, WARNING, ERROR, and CRITICAL definitions using their
-        standard-library severities and default SpectraLog colors."""
+        standard-library severities and default SpectraLog colors.
+
+        Args:
+            default_colors:
+                Optional mapping of built-in level names to colorlog-compatible
+                color names. Supplied entries override the default
+                :class:`LoggerColor` values; omitted levels keep their defaults.
+                Level names are normalized before lookup.
+
+        Raises:
+            SpectraLogLevelNotFoundError:
+                If ``default_colors`` contains a name that is not a built-in level.
+
+            InvalidSpectraLogColorError:
+                If ``default_colors`` contains a color not supported by colorlog."""
         self._lock = Lock()
         self._levels: dict[str, LogLevel] = {}
-        self._register_default_levels()
+        self._register_default_levels(default_colors or {})
 
     @property
     def colors(self) -> dict[str, str]:
@@ -210,45 +228,55 @@ class LogLevelRegistry:
 
         return contains_log_level
 
-    def _register_default_levels(self) -> None:
+    def _register_default_levels(
+        self,
+        color_overrides: Mapping[str, str],
+    ) -> None:
         """Populate the registry with SpectraLog's standard log levels.
 
         Registers DEBUG, INFO, WARNING, ERROR, and CRITICAL using the corresponding
-        standard-library logging severities and default :class:`LoggerColor` values.
+        standard-library logging severities. Each level uses its color from
+        ``color_overrides`` when supplied, otherwise its default
+        :class:`LoggerColor` value.
 
         The default levels are inserted directly into the internal mapping because
         their definitions are controlled by SpectraLog and do not require the custom
-        registration validation path."""
-        default_levels = (
-            LogLevel(
-                name="DEBUG",
-                severity=logging.DEBUG,
-                color=LoggerColor.DEBUG.value,
-            ),
-            LogLevel(
-                name="INFO",
-                severity=logging.INFO,
-                color=LoggerColor.INFO.value,
-            ),
-            LogLevel(
-                name="WARNING",
-                severity=logging.WARNING,
-                color=LoggerColor.WARNING.value,
-            ),
-            LogLevel(
-                name="ERROR",
-                severity=logging.ERROR,
-                color=LoggerColor.ERROR.value,
-            ),
-            LogLevel(
-                name="CRITICAL",
-                severity=logging.CRITICAL,
-                color=LoggerColor.CRITICAL.value,
-            ),
-        )
+        registration validation path. Only the override colors are validated.
 
-        for default_level in default_levels:
-            self._levels[default_level.name] = default_level
+        Args:
+            color_overrides:
+                Mapping of built-in level names to colorlog-compatible color names.
+
+        Raises:
+            SpectraLogLevelNotFoundError:
+                If ``color_overrides`` contains a name that is not a built-in level.
+
+            InvalidSpectraLogColorError:
+                If ``color_overrides`` contains a color not supported by colorlog."""
+        default_levels: dict[str, tuple[int, str]] = {
+            "DEBUG": (logging.DEBUG, LoggerColor.DEBUG.value),
+            "INFO": (logging.INFO, LoggerColor.INFO.value),
+            "WARNING": (logging.WARNING, LoggerColor.WARNING.value),
+            "ERROR": (logging.ERROR, LoggerColor.ERROR.value),
+            "CRITICAL": (logging.CRITICAL, LoggerColor.CRITICAL.value),
+        }
+
+        normalized_overrides = {self._normalize_name(name): color for name, color in color_overrides.items()}
+
+        for name, color in normalized_overrides.items():
+            if name not in default_levels:
+                raise SpectraLogLevelNotFoundError(
+                    f"Cannot set default color for unknown log level '{name}'.",
+                )
+
+            self._validate_color(color)
+
+        for name, (severity, default_color) in default_levels.items():
+            self._levels[name] = LogLevel(
+                name=name,
+                severity=severity,
+                color=normalized_overrides.get(name, default_color),
+            )
 
     def _normalize_name(
         self,

@@ -40,6 +40,7 @@ def CreateSpectraLogger(
     date_format: str = "%Y-%m-%d %H:%M:%S",
     max_bytes: int = 20 * (1024**2),
     backup_count: int = 1,
+    level_colors: dict[str, str] | None = None,
 ) -> ApplicationLogger:
     """Create and configure the process-wide SpectraLog application logger.
 
@@ -179,6 +180,12 @@ def CreateSpectraLogger(
             Number of rotated backup log files retained by the rotating file
             handler. Defaults to ``1``.
 
+        level_colors:
+            Optional mapping of built-in level names to colorlog-compatible
+            color names, for example ``{"INFO": "blue"}``. Supplied entries
+            override the default level colors; omitted levels keep their
+            defaults. Level names are case-insensitive. Defaults to ``None``.
+
     Returns:
         ApplicationLogger:
             The initialized process-local SpectraLog application logger.
@@ -224,6 +231,7 @@ def CreateSpectraLogger(
         date_format=date_format,
         max_bytes=max_bytes,
         backup_count=backup_count,
+        level_colors=level_colors,
     )
 
     application_logger = _create_application_logger(
@@ -420,7 +428,9 @@ def _create_application_logger(
     Returns:
         ApplicationLogger:
             The initialized process-local application logger."""
-    log_level_registry = LogLevelRegistry()
+    log_level_registry = LogLevelRegistry(
+        default_colors=configuration.level_colors,
+    )
 
     logger_builder_factory = ApplicationLoggerBuilderFactory(
         log_level_registry=log_level_registry,
